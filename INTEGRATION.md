@@ -8,9 +8,11 @@ This fork (`kdonbekci/sim-agentation`) runs from `integration`: upstream's `main
 |---|---|
 | `main` | Upstream's `main` (`lcandy2/sim-agentation`), unchanged. Only ever fast-forwarded from `upstream/main`. |
 | `fix/…`, `feat/…` | One change each, branched from `main`, with its own tests. These become upstream PRs. |
+| `fork/publish` | This fork's own release workflow (`.github/workflows/fork-release.yml`), branched from `main`. Never sent upstream. It adds a file upstream doesn't have and changes none of theirs, so it never conflicts. |
 | `integration` | `main` plus every open `fix/…` and `feat/…` branch, merged with `--no-ff`. What this machine runs. |
 
 Merged into `integration` now:
+- `fork/publish`: every push to `integration` is published as a release of this fork (see *Releases*).
 - `fix/box-selection-contents`: box notes list the controls inside a bar that the accessibility tree had to probe.
 - `fix/cli-help`: `--help`, `-h`, `--version` and `-v` answer instead of starting a server, and unknown arguments fail.
 
@@ -41,13 +43,29 @@ Then rebuild `integration` from the new `main`, so that its history stays one me
 
 ```sh
 git switch -C integration main
+git merge --no-ff fork/publish
 git merge --no-ff fix/box-selection-contents     # every branch in the list above, in order
 git merge --no-ff fix/cli-help
 pnpm build && swift test --package-path app/host
 git push --force-with-lease
 ```
 
-When upstream has taken one of our branches, drop it from the list and from the rebuild.
+When upstream has taken one of our branches, drop it from the list and from the rebuild. `fork/publish` is never taken upstream; rebase it onto the new `main` only if it stops merging cleanly.
+
+Push branches only, never tags (no `git push --tags`): a tag like `0.2.3` pushed to this fork runs upstream's Release workflow here, which publishes a release under upstream's name, takes Latest from ours, and fails in its Tap job, which needs upstream's secrets.
+
+## Releases
+
+Every push to `integration`, rebuilds included, runs *Fork release* (`.github/workflows/fork-release.yml`, from `fork/publish`): the same build and host unit tests as CI, then `app/scripts/package.sh`, published as a GitHub release of this fork marked Latest.
+
+- The tag is `Config.version`, `-kd.` and the workflow's run number: `0.2.2-kd.7`. The workflow stamps it into `Config.version` in its own checkout, never in a commit, so the build reports it (`sim-agentation version`, and the MCP server's version) and the assets carry it: `sim-agentation-0.2.2-kd.7-macos-arm64.tar.gz` and its `.sha256`.
+- Run numbers only grow, so tags stay unique and in order across force-pushes. Renaming the workflow file would start them again at 1, so don't. A re-run keeps its number; it skips a release that's already published.
+- Each release's notes name the `integration` commit it was built from, and what's merged into it. Its tag keeps that commit on GitHub after the next force-push.
+- Old releases stay. A tarball is under 1 MB, and the history is how to go back to an earlier build.
+- Not a prerelease: mise's `latest` skips releases GitHub flags as prereleases.
+- The tag doesn't match upstream's Release filter (`[0-9]+.[0-9]+.[0-9]+`), and a tag the workflow makes with its own token starts no other workflow, so neither Release nor Tap runs. Keep both turned off in this fork's Actions tab (⋯ → Disable workflow) against tags pushed by hand; that's a setting of the repo, not a change to their files.
+- To publish again without a push: Actions → Fork release → Run workflow, on `integration`.
+- Install the latest with mise: `mise use -g github:kdonbekci/sim-agentation`.
 
 ## Running it
 
