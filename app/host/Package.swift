@@ -29,5 +29,9 @@ let package = Package(
             name: "sim-agentation",
             dependencies: ["SimBridge"]
         ),
+        .testTarget(
+            name: "sim-agentationTests",
+            dependencies: ["sim-agentation"]
+        ),
     ]
 )

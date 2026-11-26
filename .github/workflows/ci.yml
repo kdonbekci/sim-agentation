@@ -28,7 +28,19 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build (UI, then the debug host)
         run: pnpm build
-      - run: app/host/.build/debug/sim-agentation version
+      - run: swift test --package-path app/host
+      - name: Command line answers without starting a server
+        # perl's alarm stands in for timeout, which the runner may not have.
+        # A free port, so a regression that serves fails fast instead of hanging.
+        env:
+          SIM_AGENTATION_PORT: "38499"
+        run: |
+          b=app/host/.build/debug/sim-agentation
+          run() { perl -e 'alarm 5; exec @ARGV' "$b" "$@"; }
+          version=$(sed -n 's/.*static let version = "\(.*\)".*/\1/p' app/host/Sources/sim-agentation/Config.swift)
+          for a in help --help -h; do run "$a" | grep -q Usage; done
+          for a in version --version -v; do test "$(run "$a")" = "$version"; done
+          ! run bogus 2>/dev/null
       - name: Package (release build)
         run: app/scripts/package.sh
       - uses: actions/upload-artifact@v4

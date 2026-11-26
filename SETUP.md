@@ -87,7 +87,7 @@ Without Homebrew (`brew` not found), point the user to https://brew.sh rather th
 
 ## 3. Check that it works
 
-- With Homebrew: `sim-agentation version` prints the version.
+- With Homebrew: `sim-agentation version` prints the version, and `sim-agentation help` lists the commands.
 - In the new session: the `sim_*` tools are there, and `sim_get_pending` answers "No pending annotations."
 - The MCP server starts the page on http://localhost:38470 when it isn't running; `sim-agentation serve --open` starts it and opens the browser. The user picks a simulator on the left and presses **Start** if it isn't running.
 
