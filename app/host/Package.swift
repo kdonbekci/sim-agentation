@@ -29,5 +29,17 @@ let package = Package(
             name: "sim-agentation",
             dependencies: ["SimBridge"]
         ),
+        // No simulator: requests are stand-in objects with the same keys, and
+        // trees are saved native walks.
+        .testTarget(
+            name: "SimBridgeTests",
+            dependencies: ["SimBridge"]
+        ),
+        // No simulator or server: trees are describe_ui output saved from a
+        // simulator, as the host emits them.
+        .testTarget(
+            name: "sim-agentationTests",
+            dependencies: ["sim-agentation"]
+        ),
     ]
 )

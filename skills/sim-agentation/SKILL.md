@@ -42,12 +42,12 @@ What each line tells you, and how far to trust it:
 | **Device** | The simulator, by name. |
 | **App** | The app's name, and its bundle ID when the app runs the SimAgentationPlus SDK. No bundle ID means no SDK. |
 | **Screen** | The navigation titles on screen, outermost first: which screen the user was on. |
-| **Source** | SDK only. The view type, and the file and line where `.simTag()` was written. That is usually where the view is *used*, so the type's own `body` may be elsewhere: search `struct ItemRow` or `class ItemRow`. The path is `Module/File.swift`; look for the file under that module's sources. `inside` lines name the tagged views around it. |
+| **Source** | SDK only. The view type, and the file and line where `.simTag()` was written. That is usually where the view is *used*, so the type's own `body` may be elsewhere: search `struct ItemRow` or `class ItemRow`. The path is `Module/File.swift`; look for the file under that module's sources. `inside` lines name the tagged views around it. A click on the text or icon inside a control starts at that text or icon's own tag, when it has one. |
 | **View controller**, **Views** | SDK only. App-defined UIKit classes around the box, innermost first. |
-| **Element** | The accessibility element clicked: role (`StaticText` is a `Text` or label, `Button`, `Image`, `Cell`), label, `id=` identifier, `value=`, and its frame in points. **Path** gives its ancestors. |
-| **Area**, **Within** | A box rather than an element; **Within** is the innermost element under the box's center. |
+| **Element** | The accessibility element clicked: role (`StaticText` is a `Text` or label, `Button`, `Image`, `Cell`), label, `id=` identifier, `value=`, and its frame in points. A click on the text or icon inside a control names the control. **Path** gives its ancestors. |
+| **Area**, **Within** | A box rather than an element; **Within** is the element under the box's center, as a click there would name it. |
 | **Elements** (n) | Several picked together. The note is about all of them at once. Each has a box color that matches the screenshot, and its own source line when the SDK knows it. |
-| **Inside the box** | The elements the box covers. |
+| **Inside the box** | The elements the box covers, at most 20 lines: controls first, then other named elements, images, and unnamed elements, smallest first within each. A control's line ends with `showing …`, naming up to three of the text runs and images inside it, each name once (`and N more` counts the rest); those don't get lines of their own. Something drawn over a control, rather than inside it, keeps its own line. Unnamed groups around a listed element are left out, and an element listed twice in the tree gets one line. A last `and N more` line counts what didn't fit. |
 | **Search the source for** | Labels and identifiers from the accessibility tree. A starting point; see below for why they often don't match the source as written. With several elements picked, this can include text from whatever lies between them. |
 | **Screenshot**, **Close-up** | Absolute paths to JPEGs: the whole screen with the box drawn on it, and the box up close. |
 | **agent** / **human** lines | Earlier replies on this note. Read them before starting; they may settle a question or change the request. |

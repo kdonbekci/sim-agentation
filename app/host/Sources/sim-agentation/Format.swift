@@ -39,6 +39,89 @@ enum Format {
         values.map { $0.isNull ? "" : JS.string($0) }.joined(separator: separator)
     }
 
+    /// Lines listed under "Inside the box"; the rest are counted.
+    private static let insideLines = 20
+    /// What a control's line names of the things drawn in it; the rest are counted.
+    private static let shownPerControl = 3
+
+    /// "a", "a and b", "a, b and c".
+    private static func list(_ items: [String]) -> String {
+        guard let last = items.last, items.count > 1 else { return items.joined() }
+        return items.dropLast().joined(separator: ", ") + " and " + last
+    }
+
+    /// What the box holds, one line each: named controls first, then other
+    /// named elements, images and unnamed elements (`AX.rank`), smallest
+    /// first within each. With the tree's ancestry (each node's `parent`, a
+    /// position in the same list), what a listed control holds goes on that
+    /// control's line, so a bar's icons, text runs and wrapper groups don't
+    /// push its controls off the list, and an unnamed wrapper around a
+    /// listed element adds nothing and is left out. Only descendants fold:
+    /// something drawn over a control, such as a floating search field over
+    /// a list row, keeps its own line. Notes saved without ancestry list
+    /// every node. Lines that read the same (the automation tree can hold an
+    /// element twice) are one line. The last line counts what didn't fit,
+    /// including nodes the server didn't keep (`insideTotal`).
+    private static func inside(_ a: JSONObject, besides target: JSON?) -> [String] {
+        let given = items(a["inside"])
+        let actionable = given.map(AX.actionable)
+        // Ties keep list order, so notes stored smallest first come out the same as new ones.
+        let order = given.indices.filter { !strictEquals(given[$0], target) }
+            .sorted { (AX.rank(given[$0]), $0) < (AX.rank(given[$1]), $1) }
+        func parent(_ i: Int) -> Int? {
+            guard let p = given[i]["parent"]?.numberValue.flatMap({ Int(exactly: $0) }), given.indices.contains(p) else { return nil }
+            return p
+        }
+        // Innermost first; a malformed list that loops stops after a full pass.
+        let ancestors: [[Int]] = given.indices.map { i in
+            var out: [Int] = []
+            var at = parent(i)
+            while let p = at, p != i, out.count < given.count { out.append(p); at = parent(p) }
+            return out
+        }
+        // The listed control each node's line folds into, if any.
+        var held: [Int: [Int]] = [:]
+        var listed: [Int] = []
+        for i in order {
+            if !actionable[i], let j = ancestors[i].first(where: { actionable[$0] }) {
+                held[j, default: []].append(i)
+            } else {
+                listed.append(i)
+            }
+        }
+        let around = Set(listed.flatMap { ancestors[$0] })
+        var lines: [(head: String, shown: [String])] = []
+        var lineOf: [String: Int] = [:]
+        for j in listed where !(AX.rank(given[j]) == 3 && around.contains(j)) {
+            let n = given[j]
+            // Only what adds a name the control's own line doesn't print.
+            let own = [n["label"], n["value"], n["identifier"]].compactMap { JS.trimmed($0) }.filter { !$0.isEmpty }
+            let shown = (held[j] ?? []).map { given[$0] }.filter { m in
+                let label = JS.trimmed(m["label"]) ?? ""
+                return (!label.isEmpty && !own.contains { JS.same($0, label) })
+                    || (JS.truthy(m["identifier"]) && !strictEquals(m["identifier"], n["identifier"]))
+            }.map(node)
+            let head = "\(node(n)) at \(frame(n["frame"]))"
+            if let k = lineOf[head] {
+                lines[k].shown += shown
+            } else {
+                lineOf[head] = lines.count
+                lines.append((head, shown))
+            }
+        }
+        let text = lines.map { line in
+            // The automation tree can hold the same text run twice in one control.
+            let shown = line.shown.reduce(into: [String]()) { seen, name in if !seen.contains(name) { seen.append(name) } }
+            let named = shown.count > shownPerControl
+                ? shown.prefix(shownPerControl) + ["\(shown.count - shownPerControl) more"]
+                : shown
+            return line.head + (named.isEmpty ? "" : ", showing \(list(Array(named)))")
+        }
+        let dropped = max(0, Int(a["insideTotal"]?.numberValue ?? 0) - given.count)
+        let more = max(0, text.count - insideLines) + dropped
+        return more > 0 ? text.prefix(insideLines) + ["and \(more) more"] : text
+    }
+
     /// Strings worth grepping the Swift sources for. With several picked
     /// together, the box spans everything between them, so what it covers
     /// isn't part of the note: only the picks themselves count.
@@ -117,10 +200,10 @@ enum Format {
             lines.append("- **Area**: \(picked.map { "\($0) at " } ?? "")\(frame(a["rect"]))")
             if JS.truthy(a["within"]) { lines.append("- **Within**: \(node(a["within"])) at \(frame(a["within"]?["frame"]))") }
         }
-        let inside = items(a["inside"]).filter { !strictEquals($0, target) }.prefix(12)
+        let inside = inside(a, besides: target)
         if !inside.isEmpty && parts.count < 2 {
             lines.append("- **Inside the box**:")
-            for n in inside { lines.append("  - \(node(n)) at \(frame(n["frame"]))") }
+            for line in inside { lines.append("  - \(line)") }
         }
         let terms = searchTerms(a)
         if !terms.isEmpty { lines.append("- **Search the source for**: \(terms.map { "`\($0)`" }.joined(separator: ", "))") }
