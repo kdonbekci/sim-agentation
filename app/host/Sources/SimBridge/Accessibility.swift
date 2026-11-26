@@ -37,9 +37,13 @@ public enum Accessibility {
             // The application element can come back 0×0 (AXPTranslator has no
             // host window to size it against); give it the screen.
             let deadline = min(ctx.deadline, Date().addingTimeInterval(recoveryBudget))
+            // Holders whose children this recovery has read: hit testing can
+            // answer with the same holder for every point inside it, and its
+            // subtree only needs reading once.
+            var readHolders = Set<String>()
             let (recovered, probes) = CollapsedChildrenRecovery.recover(
                 in: base.withScreenFrame(ctx.transform.pointSize).json,
-                probe: { point in probeHit(at: point, ctx: ctx, deadline: deadline)?.json },
+                probe: { point in probeHit(at: point, ctx: ctx, deadline: deadline, readHolders: &readHolders)?.json },
                 deadline: deadline
             )
             log("accessibility: recovered with \(probes) probes")
@@ -130,15 +134,18 @@ public enum Accessibility {
     /// holds others (`CollapsedChildrenRecovery.holderRoles`) and covers
     /// less than half the screen. Hit testing can answer with the holder
     /// for every point inside it, as a tab bar may, so its children are the
-    /// only way to its controls. Other hits are read alone, which keeps a
-    /// probe to one element's attributes.
-    private static func probeHit(at point: CGPoint, ctx: Context, deadline: Date) -> AXNode? {
+    /// only way to its controls. Other hits, and holders already in
+    /// `readHolders`, are read alone, which keeps a probe to one element's
+    /// attributes.
+    private static func probeHit(at point: CGPoint, ctx: Context, deadline: Date, readHolders: inout Set<String>) -> AXNode? {
         guard let element = element(at: point, ctx: ctx) else { return nil }
         let hit = AXNode.walk(element, transform: ctx.transform, depthCap: 0, deadline: deadline)
         let screen = ctx.transform.pointSize
         guard CollapsedChildrenRecovery.holderRoles.contains(hit.role),
               hit.frame.width * hit.frame.height < screen.width * screen.height / 2,
-              Date() < deadline else { return hit }
+              Date() < deadline,
+              let key = CollapsedChildrenRecovery.identityKey(for: hit.json),
+              readHolders.insert(key).inserted else { return hit }
         stampSubtree(element, token: ctx.token, depth: 0, cap: probeDepth)
         let kids = children(of: element).map { AXNode.walk($0, transform: ctx.transform, depthCap: probeDepth - 1, deadline: deadline) }
         return hit.with(children: kids)
