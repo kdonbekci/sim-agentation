@@ -1,0 +1,108 @@
+name: Fork release
+
+# This fork's own release (kdonbekci/sim-agentation only). Each push to
+# integration builds it, runs the host unit tests, and publishes the
+# tarball as a GitHub release (marked Latest when it's integration's
+# current head), tagged
+# <Config.version>-kd.<run number> (0.2.2-kd.7). The build reports that
+# tag as its version, and the assets carry it.
+#
+# This file and INTEGRATION.md live on fork/publish, which every rebuild
+# of integration merges back in. Upstream's release.yml and
+# tap.yml stay untouched: this tag doesn't match release.yml's
+# '[0-9]+.[0-9]+.[0-9]+', and a tag made with GITHUB_TOKEN starts no
+# workflow anyway. Don't rename this file: the run number, and with it
+# the tag, starts again at 1 for a new workflow file.
+
+# Push only: GitHub offers Run workflow (workflow_dispatch) only for
+# workflows on the default branch, and this fork's is main, upstream's.
+on:
+  push:
+    branches: [integration]
+
+permissions:
+  contents: write
+
+# One at a time, never cancelled mid-upload. A push during a run waits;
+# a newer push replaces a waiting one, so the newest build publishes last.
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'kdonbekci/sim-agentation' && github.ref == 'refs/heads/integration'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # origin/main, for the notes
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Name this build, and stamp the name into Config.version
+        # Only in this checkout: the stamp is never committed.
+        run: |
+          config=app/host/Sources/sim-agentation/Config.swift
+          version=$(sed -n 's/.*static let version = "\(.*\)".*/\1/p' "$config")
+          echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::Config.version is $version, not x.y.z"; exit 1; }
+          tag="$version-kd.$GITHUB_RUN_NUMBER"
+          TAG="$tag" perl -pi -e 's/static let version = "[^"]+"/static let version = "$ENV{TAG}"/' "$config"
+          grep -q "static let version = \"$tag\"" "$config" || { echo "::error::couldn't stamp $tag"; exit 1; }
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+      - name: Build (UI, then the debug host)
+        run: pnpm build
+      - name: The build reports the tag
+        run: test "$(app/host/.build/debug/sim-agentation version)" = "$TAG"
+      - name: Host unit tests
+        run: swift test --package-path app/host
+      - name: Package (release build)
+        run: |
+          app/scripts/package.sh
+          cd dist && shasum -a 256 "sim-agentation-$TAG-macos-arm64.tar.gz" > "sim-agentation-$TAG-macos-arm64.tar.gz.sha256"
+      - name: The tarball unpacks to a working install
+        run: |
+          (cd dist && shasum -a 256 -c "sim-agentation-$TAG-macos-arm64.tar.gz.sha256")
+          tarball="$PWD/dist/sim-agentation-$TAG-macos-arm64.tar.gz"
+          cd "$(mktemp -d)" && tar -xzf "$tarball"
+          test "$(ls)" = "sim-agentation-$TAG" || { echo "::error::the tarball's top level isn't just sim-agentation-$TAG/"; exit 1; }
+          test "$("sim-agentation-$TAG/bin/sim-agentation" version)" = "$TAG"
+          test -f "sim-agentation-$TAG/web/index.html" && test -f "sim-agentation-$TAG/web/dist/index.html"
+      - name: Release notes
+        run: |
+          {
+            echo "\`integration\` at $GITHUB_SHA: upstream \`main\` at $(git rev-parse --short origin/main), plus:"
+            echo
+            git log --first-parent --format='- %s (%h)' origin/main..HEAD
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A re-run keeps the run number, so the tag may be taken already.
+          draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)
+          case $draft in
+            false) echo "$TAG is published already"; exit 0 ;;
+            true) gh release delete "$TAG" --yes ;; # left by an upload that failed
+          esac
+          # Latest only for integration's current head. mise's `latest` follows
+          # GitHub's Latest flag, not the highest tag, so a re-run of an older
+          # run that failed mustn't take it from a newer build.
+          head=$(git ls-remote origin refs/heads/integration | cut -f1)
+          latest=false
+          [ "$head" = "$GITHUB_SHA" ] && latest=true
+          echo "integration is at $head; this build is $GITHUB_SHA; Latest: $latest"
+          # Not --prerelease: mise's `latest` skips releases GitHub flags as prereleases.
+          gh release create "$TAG" \
+            "dist/sim-agentation-$TAG-macos-arm64.tar.gz" \
+            "dist/sim-agentation-$TAG-macos-arm64.tar.gz.sha256" \
+            --target "$GITHUB_SHA" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest="$latest"
