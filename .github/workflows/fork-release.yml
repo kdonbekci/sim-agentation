@@ -2,21 +2,23 @@ name: Fork release
 
 # This fork's own release (kdonbekci/sim-agentation only). Each push to
 # integration builds it, runs the host unit tests, and publishes the
-# tarball as a GitHub release marked Latest, tagged
+# tarball as a GitHub release (marked Latest when it's integration's
+# current head), tagged
 # <Config.version>-kd.<run number> (0.2.2-kd.7). The build reports that
 # tag as its version, and the assets carry it.
 #
-# This file lives on fork/publish, which INTEGRATION.md lists, so every
-# rebuild of integration merges it back in. Upstream's release.yml and
+# This file and INTEGRATION.md live on fork/publish, which every rebuild
+# of integration merges back in. Upstream's release.yml and
 # tap.yml stay untouched: this tag doesn't match release.yml's
 # '[0-9]+.[0-9]+.[0-9]+', and a tag made with GITHUB_TOKEN starts no
 # workflow anyway. Don't rename this file: the run number, and with it
 # the tag, starts again at 1 for a new workflow file.
 
+# Push only: GitHub offers Run workflow (workflow_dispatch) only for
+# workflows on the default branch, and this fork's is main, upstream's.
 on:
   push:
     branches: [integration]
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -92,8 +94,15 @@ jobs:
             false) echo "$TAG is published already"; exit 0 ;;
             true) gh release delete "$TAG" --yes ;; # left by an upload that failed
           esac
+          # Latest only for integration's current head. mise's `latest` follows
+          # GitHub's Latest flag, not the highest tag, so a re-run of an older
+          # run that failed mustn't take it from a newer build.
+          head=$(git ls-remote origin refs/heads/integration | cut -f1)
+          latest=false
+          [ "$head" = "$GITHUB_SHA" ] && latest=true
+          echo "integration is at $head; this build is $GITHUB_SHA; Latest: $latest"
           # Not --prerelease: mise's `latest` skips releases GitHub flags as prereleases.
           gh release create "$TAG" \
             "dist/sim-agentation-$TAG-macos-arm64.tar.gz" \
             "dist/sim-agentation-$TAG-macos-arm64.tar.gz.sha256" \
-            --target "$GITHUB_SHA" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest
+            --target "$GITHUB_SHA" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest="$latest"
