@@ -13,7 +13,7 @@ This fork (`kdonbekci/sim-agentation`) runs from `integration`: upstream's `main
 
 Merged into `integration` now:
 - `fork/publish`: every push to `integration` is published as a release of this fork (see *Releases*).
-- `fix/box-selection-contents`: box notes list the controls inside a bar that the accessibility tree had to probe.
+- `fix/native-tree`: translator requests ask for the app's automation tree (client type 2, as AXe and idb do), so the tree comes back nested with every control; probing runs only on a flat tree; clicks name the control they land in, picked once, in the page; box notes list a box's controls first, with what each shows.
 - `fix/cli-help`: `--help`, `-h`, `--version` and `-v` answer instead of starting a server, and unknown arguments fail.
 
 ## Adding a change
@@ -21,16 +21,16 @@ Merged into `integration` now:
 ```sh
 git switch main && git switch -c fix/<name>       # or feat/<name>
 # change, add a test, then:
-pnpm build && swift test --package-path app/host
+pnpm build && swift test --package-path app/host && pnpm test
 git push -u origin fix/<name>
 
 git switch integration
 git merge --no-ff fix/<name>
-pnpm build && swift test --package-path app/host
+pnpm build && swift test --package-path app/host && pnpm test
 git push
 ```
 
-Update the "Merged into `integration` now" list above in the same merge. Branches that each add to `app/host/Package.swift` or `.github/workflows/ci.yml` conflict there. There is one `sim-agentationTests` target and one "Host unit tests" step; merge into those rather than adding a second.
+Update the "Merged into `integration` now" list above in the same merge. Branches that each add to `app/host/Package.swift` or `.github/workflows/ci.yml` conflict there. There is one `sim-agentationTests` and one `SimBridgeTests` target, one fixture folder (`app/host/Tests/Fixtures`, read by both and by `app/web/test`), and one "Host unit tests" step; merge into those rather than adding a second.
 
 ## Taking in upstream
 
@@ -44,9 +44,9 @@ Then rebuild `integration` from the new `main`, so that its history stays one me
 ```sh
 git switch -C integration main
 git merge --no-ff fork/publish
-git merge --no-ff fix/box-selection-contents     # every branch in the list above, in order
+git merge --no-ff fix/native-tree                # every branch in the list above, in order
 git merge --no-ff fix/cli-help
-pnpm build && swift test --package-path app/host
+pnpm build && swift test --package-path app/host && pnpm test
 git push --force-with-lease
 ```
 
@@ -87,7 +87,7 @@ app/host/.build/debug/sim-agentation serve --open
 
 A box note can be created from a script, as the page does:
 1. Ask for the tree over `ws://127.0.0.1:38470/ws/<udid>` with `{"type":"describe_ui"}` and wait for `describe_ui_result`.
-2. POST it to `/api/annotations` with `kind: "area"`, the `rect` in points, `tree`, and base64 `full` and `crop` images.
+2. Build the body as the page does, with its own `app/web/src/lib/ax.js`: `refs(tree, screen, {kind, rect, target})` gives `target` (an element) or `within` (an area), each a position in `flatten(tree)`. POST it to `/api/annotations` with `kind`, the `rect` in points, `tree`, those references, and base64 `full` and `crop` images. A body with a tree but no references is refused (409), as from a page older than the server; a body with no tree saves the rect alone.
 3. Read the note back through `sim-agentation mcp` (`sim_get_pending`).
 
 Run the same request against a server built from `main` on another port to compare the two.
