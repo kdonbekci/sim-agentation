@@ -29,5 +29,10 @@ let package = Package(
             name: "sim-agentation",
             dependencies: ["SimBridge"]
         ),
+        // No simulator or server: probes are answered from a fixture tree.
+        .testTarget(
+            name: "sim-agentationTests",
+            dependencies: ["sim-agentation", "SimBridge"]
+        ),
     ]
 )

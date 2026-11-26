@@ -39,6 +39,34 @@ enum Format {
         values.map { $0.isNull ? "" : JS.string($0) }.joined(separator: separator)
     }
 
+    /// Controls whose label already names the image or text run drawn in them.
+    private static let controls: Set<String> = [
+        "AXButton", "AXRadioButton", "AXCheckBox", "AXPopUpButton", "AXMenuButton", "AXLink", "AXMenuItem", "AXCell",
+    ]
+
+    private static func within(_ inner: JSON?, _ outer: JSON?) -> Bool {
+        let i = inner?["frame"], o = outer?["frame"]
+        let slack = 1.0
+        return JS.number(i?["x"]) + slack >= JS.number(o?["x"])
+            && JS.number(i?["y"]) + slack >= JS.number(o?["y"])
+            && JS.number(i?["x"]) + JS.number(i?["width"]) <= JS.number(o?["x"]) + JS.number(o?["width"]) + slack
+            && JS.number(i?["y"]) + JS.number(i?["height"]) <= JS.number(o?["y"]) + JS.number(o?["height"]) + slack
+    }
+
+    /// What the box holds, as listed in the note: the stored `inside` minus
+    /// each image or text run that sits in a labelled control listed with it.
+    /// A tab button's icon says nothing the button doesn't, and a bar of six
+    /// would push its controls off the list.
+    private static func listed(_ a: JSONObject) -> [JSON] {
+        let all = items(a["inside"])
+        return all.filter { n in
+            guard ["AXImage", "AXStaticText"].contains(JS.string(n["role"])) else { return true }
+            return !all.contains { c in
+                controls.contains(JS.string(c["role"])) && JS.truthy(c["label"]) && within(n, c)
+            }
+        }
+    }
+
     /// Strings worth grepping the Swift sources for. With several picked
     /// together, the box spans everything between them, so what it covers
     /// isn't part of the note: only the picks themselves count.
@@ -46,7 +74,7 @@ enum Format {
         var terms: [String] = []
         let picked = items(a["parts"])
         let parts = picked.flatMap { [$0["target"], $0["within"]] }
-        let inside = picked.count > 1 ? [] : items(a["inside"]).map(Optional.some)
+        let inside = picked.count > 1 ? [] : listed(a).map(Optional.some)
         for n in ([a["target"], a["within"]] + parts + inside) where JS.truthy(n) {
             for key in ["identifier", "label", "title"] {
                 guard let t = JS.trimmed(n?[key]), !t.isEmpty, JS.length(t) > 1, JS.length(t) < 60 else { continue }
@@ -117,10 +145,11 @@ enum Format {
             lines.append("- **Area**: \(picked.map { "\($0) at " } ?? "")\(frame(a["rect"]))")
             if JS.truthy(a["within"]) { lines.append("- **Within**: \(node(a["within"])) at \(frame(a["within"]?["frame"]))") }
         }
-        let inside = items(a["inside"]).filter { !strictEquals($0, target) }.prefix(12)
+        let inside = listed(a).filter { !strictEquals($0, target) }
         if !inside.isEmpty && parts.count < 2 {
             lines.append("- **Inside the box**:")
-            for n in inside { lines.append("  - \(node(n)) at \(frame(n["frame"]))") }
+            for n in inside.prefix(12) { lines.append("  - \(node(n)) at \(frame(n["frame"]))") }
+            if inside.count > 12 { lines.append("  - and \(inside.count - 12) more") }
         }
         let terms = searchTerms(a)
         if !terms.isEmpty { lines.append("- **Search the source for**: \(terms.map { "`\($0)`" }.joined(separator: ", "))") }

@@ -10,6 +10,16 @@
 // - Logging and perf counters are dropped.
 // - A root with no children at all is probed as a phase-1 container
 //   whatever its role (sim-use's tree source never returns that shape).
+// - Probe hits come back without children, so a hit that is itself a
+//   container (a navigation bar's group, a tab group) is probed in turn
+//   instead of being skipped as synthesized. Its frame goes into the
+//   covered set at its parent's level, so probing inside it is the only way
+//   to reach the controls in it. AXTabGroup and AXToolbar qualify as
+//   containers alongside AXGroup.
+// - A hit belongs to the probed region when it is no bigger than the region
+//   and its centre is inside it, rather than when it fits inside the region
+//   to within 1 pt: a navigation bar's tab buttons stick out 1.3 pt above
+//   the bar's group.
 // The quadtree, budgets, caps, thresholds and blind-zone maths are unchanged.
 
 import CoreGraphics
@@ -120,7 +130,7 @@ public enum CollapsedChildrenRecovery {
             children.append(walk(node: child, probe: probe, budget: budget, tuning: tuning, seen: seen, scanBlindZones: scanBlindZones))
         }
 
-        // Phase 1 — probe empty AXGroups (and an empty root).
+        // Phase 1 — probe empty containers (and an empty root).
         if children.isEmpty, shouldProbe(node) || (isRoot && rect(of: node) != nil) {
             let synthesized = runProbes(
                 parent: node, seedRegions: nil, existingChildren: [],
@@ -158,11 +168,16 @@ public enum CollapsedChildrenRecovery {
         return node
     }
 
+    /// Roles that hold other elements: the shapes AXPTranslator collapses.
+    public static let containerRoles: Set<String> = ["AXGroup", "AXTabGroup", "AXToolbar"]
+
     public static func shouldProbe(_ node: [String: Any]) -> Bool {
-        // Only AXGroup containers — the shape AXPTranslator collapses.
-        guard (node["role"] as? String) == "AXGroup" else { return false }
-        // Skip anything we synthesized ourselves to avoid re-probing the same frame.
-        if (node["synthesized"] as? Bool) == true { return false }
+        guard let role = node["role"] as? String, containerRoles.contains(role) else { return false }
+        // Synthesized hits are probed too: a probe returns its element
+        // without children, so a container hit is empty however full it is
+        // on screen. A probe that lands on the container itself is skipped
+        // (see `runProbes`), and `seen` stops a hit from being added twice,
+        // so this terminates.
         guard let f = frameTuple(of: node),
               f.width >= minContainerWidth,
               f.height >= minContainerHeight else {
@@ -249,7 +264,7 @@ public enum CollapsedChildrenRecovery {
 
             guard let hitRect = rect(of: hit) else { continue }
 
-            if !rectContained(hitRect, in: region, slack: slack) { continue }
+            if !belongs(hitRect, to: region, slack: slack) { continue }
 
             // Phase 2 dedup: a hit inside any existing direct-child frame is
             // already represented by a descendant of that child.
@@ -283,6 +298,16 @@ public enum CollapsedChildrenRecovery {
     }
 
     // MARK: - Geometry helpers
+
+    /// A hit is one of the region's elements when it is no bigger than the
+    /// region and centred inside it. Larger hits are ancestors; hits centred
+    /// outside are neighbours. Children may stick out of their container by
+    /// a point or two, so the edges are not checked.
+    private static func belongs(_ hit: CGRect, to region: CGRect, slack: CGFloat) -> Bool {
+        hit.width <= region.width + slack
+            && hit.height <= region.height + slack
+            && region.contains(CGPoint(x: hit.midX, y: hit.midY))
+    }
 
     private static func rectContained(_ inner: CGRect, in outer: CGRect, slack: CGFloat) -> Bool {
         if inner.minX + slack < outer.minX { return false }
