@@ -39,6 +39,47 @@ enum Format {
         values.map { $0.isNull ? "" : JS.string($0) }.joined(separator: separator)
     }
 
+    /// Controls whose label already names the image or text run drawn in them.
+    private static let controls: Set<String> = [
+        "AXButton", "AXRadioButton", "AXCheckBox", "AXPopUpButton", "AXMenuButton", "AXLink", "AXMenuItem", "AXCell",
+    ]
+
+    private static func within(_ inner: JSON?, _ outer: JSON?) -> Bool {
+        let i = inner?["frame"], o = outer?["frame"]
+        let slack = 1.0
+        return JS.number(i?["x"]) + slack >= JS.number(o?["x"])
+            && JS.number(i?["y"]) + slack >= JS.number(o?["y"])
+            && JS.number(i?["x"]) + JS.number(i?["width"]) <= JS.number(o?["x"]) + JS.number(o?["width"]) + slack
+            && JS.number(i?["y"]) + JS.number(i?["height"]) <= JS.number(o?["y"]) + JS.number(o?["height"]) + slack
+    }
+
+    /// Lines listed under "Inside the box" before the rest are counted.
+    private static let insideLines = 12
+
+    /// What the box holds, one line each, smallest first as stored. When
+    /// that is more than `insideLines`, each image or text run that sits in
+    /// a labelled control listed with it moves onto that control's line, so
+    /// a bar of tab icons doesn't push the tabs off the list; what is still
+    /// left over is counted.
+    private static func inside(_ a: JSONObject, besides target: JSON?) -> [String] {
+        let all = items(a["inside"]).filter { !strictEquals($0, target) }
+        func line(_ n: JSON) -> String { "\(node(n)) at \(frame(n["frame"]))" }
+        guard all.count > insideLines else { return all.map(line) }
+        var holder = [Int?](repeating: nil, count: all.count)
+        for (i, n) in all.enumerated() where ["AXImage", "AXStaticText"].contains(JS.string(n["role"])) {
+            holder[i] = all.indices.first { j in
+                j != i && controls.contains(JS.string(all[j]["role"])) && JS.truthy(all[j]["label"]) && within(n, all[j])
+            }
+        }
+        var lines: [String] = []
+        for (j, n) in all.enumerated() where holder[j] == nil {
+            let shown = all.indices.filter { holder[$0] == j }.map { node(all[$0]) }
+            lines.append(line(n) + (shown.isEmpty ? "" : ", showing \(shown.joined(separator: " and "))"))
+        }
+        guard lines.count > insideLines else { return lines }
+        return lines.prefix(insideLines) + ["and \(lines.count - insideLines) more"]
+    }
+
     /// Strings worth grepping the Swift sources for. With several picked
     /// together, the box spans everything between them, so what it covers
     /// isn't part of the note: only the picks themselves count.
@@ -117,10 +158,10 @@ enum Format {
             lines.append("- **Area**: \(picked.map { "\($0) at " } ?? "")\(frame(a["rect"]))")
             if JS.truthy(a["within"]) { lines.append("- **Within**: \(node(a["within"])) at \(frame(a["within"]?["frame"]))") }
         }
-        let inside = items(a["inside"]).filter { !strictEquals($0, target) }.prefix(12)
+        let inside = inside(a, besides: target)
         if !inside.isEmpty && parts.count < 2 {
             lines.append("- **Inside the box**:")
-            for n in inside { lines.append("  - \(node(n)) at \(frame(n["frame"]))") }
+            for line in inside { lines.append("  - \(line)") }
         }
         let terms = searchTerms(a)
         if !terms.isEmpty { lines.append("- **Search the source for**: \(terms.map { "`\($0)`" }.joined(separator: ", "))") }

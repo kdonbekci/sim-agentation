@@ -10,7 +10,28 @@
 // - Logging and perf counters are dropped.
 // - A root with no children at all is probed as a phase-1 container
 //   whatever its role (sim-use's tree source never returns that shape).
-// The quadtree, budgets, caps, thresholds and blind-zone maths are unchanged.
+// - A probe hit may carry children (see `Accessibility`); they are kept,
+//   minus any element already seen, so a hit holding a tab bar brings its
+//   tabs even when hit testing only ever answers with the holder.
+// - A hit that is itself a container (a navigation bar's group, a tab group)
+//   and came back without children is probed in turn instead of being
+//   skipped as synthesized: the probe returns its element alone, so it is
+//   empty however full it is on screen. Hits from the same level that lie
+//   inside it are moved under it first, and their frames count as covered
+//   there, so they are not probed twice. AXTabGroup and AXToolbar qualify
+//   as containers alongside AXGroup.
+// - A probe answer that adds nothing still steers the sampling. When the
+//   parent, an ancestor or anything else covering the whole cell answers,
+//   the cell is split into quadrants (under the same cap as a nil answer):
+//   between controls the container answers, and the controls sit in the
+//   gaps. When an element already seen, a neighbour or an existing child
+//   answers, its frame counts as covered and the rest of the cell is
+//   sampled, so every control in a row is reached whatever order the hits
+//   come in.
+// - A hit belongs to the probed region when it fits inside it to within
+//   `overhang` points rather than 1 pt: a navigation bar's tab buttons and
+//   heading stick out up to 1.7 pt above the bar's group.
+// The quadtree, budgets, caps, thresholds and blind-zone maths are otherwise unchanged.
 
 import CoreGraphics
 import Foundation
@@ -102,8 +123,12 @@ public enum CollapsedChildrenRecovery {
         public let phase2NilRefineCap: Int = 6
     }
 
+    /// `adopted` are hits found at the parent's level that lie inside this
+    /// node: they become its children, and phase 1 treats their frames as
+    /// already covered.
     private static func walk(
         node: [String: Any],
+        adopted: [[String: Any]] = [],
         probe: PointProbe,
         budget: ProbeBudget,
         tuning: Tuning,
@@ -115,20 +140,21 @@ public enum CollapsedChildrenRecovery {
 
         let existing = (node["children"] as? [[String: Any]]) ?? []
         var children: [[String: Any]] = []
-        children.reserveCapacity(existing.count)
+        children.reserveCapacity(existing.count + adopted.count)
         for child in existing {
             children.append(walk(node: child, probe: probe, budget: budget, tuning: tuning, seen: seen, scanBlindZones: scanBlindZones))
         }
 
-        // Phase 1 — probe empty AXGroups (and an empty root).
-        if children.isEmpty, shouldProbe(node) || (isRoot && rect(of: node) != nil) {
-            let synthesized = runProbes(
-                parent: node, seedRegions: nil, existingChildren: [],
+        // Phase 1 — probe empty containers (and an empty root).
+        var found = adopted
+        if existing.isEmpty, shouldProbe(node) || (isRoot && rect(of: node) != nil) {
+            found += runProbes(
+                parent: node, seedRegions: nil, existingChildren: adopted,
                 probe: probe, budget: budget, tuning: tuning, seen: seen
             )
-            for probed in synthesized {
-                children.append(walk(node: probed, probe: probe, budget: budget, tuning: tuning, seen: seen, scanBlindZones: scanBlindZones))
-            }
+        }
+        for (probed, inside) in nest(found) {
+            children.append(walk(node: probed, adopted: inside, probe: probe, budget: budget, tuning: tuning, seen: seen, scanBlindZones: scanBlindZones))
         }
 
         // Phase 2 — probe significant blind zones between siblings.
@@ -148,8 +174,8 @@ public enum CollapsedChildrenRecovery {
                     parent: node, seedRegions: blindZones, existingChildren: children,
                     probe: probe, budget: budget, tuning: tuning, seen: seen
                 )
-                for probed in discovered {
-                    children.append(walk(node: probed, probe: probe, budget: budget, tuning: tuning, seen: seen, scanBlindZones: scanBlindZones))
+                for (probed, inside) in nest(discovered) {
+                    children.append(walk(node: probed, adopted: inside, probe: probe, budget: budget, tuning: tuning, seen: seen, scanBlindZones: scanBlindZones))
                 }
             }
         }
@@ -158,11 +184,24 @@ public enum CollapsedChildrenRecovery {
         return node
     }
 
+    /// Roles that hold other elements: the shapes AXPTranslator collapses.
+    public static let containerRoles: Set<String> = ["AXGroup", "AXTabGroup", "AXToolbar"]
+
+    /// Roles whose children a probe reads along with the hit: the
+    /// containers, and headings, which in a navigation bar can hold its tab
+    /// bar.
+    public static let holderRoles: Set<String> = containerRoles.union(["AXHeading"])
+
+    /// How far, in points, an element may stick out of the container it
+    /// belongs to.
+    public static let overhang: Double = 4
+
     public static func shouldProbe(_ node: [String: Any]) -> Bool {
-        // Only AXGroup containers — the shape AXPTranslator collapses.
-        guard (node["role"] as? String) == "AXGroup" else { return false }
-        // Skip anything we synthesized ourselves to avoid re-probing the same frame.
-        if (node["synthesized"] as? Bool) == true { return false }
+        guard let role = node["role"] as? String, containerRoles.contains(role) else { return false }
+        // Synthesized hits are probed too: a probe may return its element
+        // without children, so a container hit is empty however full it is
+        // on screen. `seen` stops a hit from being added twice, so nested
+        // probing ends.
         guard let f = frameTuple(of: node),
               f.width >= minContainerWidth,
               f.height >= minContainerHeight else {
@@ -224,45 +263,71 @@ public enum CollapsedChildrenRecovery {
         drain: while let cell = queue.pop(), budget.available {
             let centre = CGPoint(x: cell.midX, y: cell.midY)
 
-            if covered.contains(where: { $0.insetBy(dx: -touchTargetSlop, dy: -touchTargetSlop).contains(centre) }) {
+            // Opportunistic remainder subdivide: everything the hit did not
+            // occupy becomes a candidate for further sampling so thin
+            // neighbours stay reachable through the refinement chain.
+            func sampleRest(besides hitRect: CGRect) {
+                for remainder in subtract(hitRect, from: cell)
+                where remainder.width * remainder.height > CGFloat(tuning.minRemainderArea) {
+                    queue.push(remainder)
+                }
+            }
+
+            // A cell centred on something already found is not probed, but
+            // the rest of it is still sampled: a strip left beside one tab
+            // can run on into the next.
+            if let known = covered.first(where: { $0.insetBy(dx: -touchTargetSlop, dy: -touchTargetSlop).contains(centre) }) {
+                sampleRest(besides: known.insetBy(dx: -touchTargetSlop, dy: -touchTargetSlop))
                 continue
             }
 
             budget.consume()
 
-            guard let hit = probe(centre) else {
-                // Nil-refine is capped per phase: phase 1 looser (small
-                // AXGroup containers may hide a single tight element), phase
-                // 2 tighter (the blind zone is usually either populated or
-                // really empty).
-                let cap = seedRegions == nil ? tuning.phase1NilRefineCap : tuning.phase2NilRefineCap
+            // Nil-refine is capped per phase: phase 1 looser (small AXGroup
+            // containers may hide a single tight element), phase 2 tighter
+            // (the blind zone is usually either populated or really empty).
+            // Answers that cover the whole cell without adding to it count
+            // as nil: between controls the container answers.
+            let cap = seedRegions == nil ? tuning.phase1NilRefineCap : tuning.phase2NilRefineCap
+            func refine() {
                 if nilRefineCount < cap, min(cell.width, cell.height) > CGFloat(tuning.minCellSize) {
                     for quadrant in splitQuadrants(cell) { queue.push(quadrant) }
                     nilRefineCount += 1
                 }
+            }
+
+            guard let hit = probe(centre), let hitRect = rect(of: hit) else {
+                refine()
                 continue
             }
 
-            if let parentKey, identityKey(for: hit).map({ $0.components(separatedBy: "|")[0] }) == parentKey.components(separatedBy: "|")[0] {
-                continue // the probe hit the parent itself
+            let isParent = parentKey != nil
+                && identityKey(for: hit).map({ $0.components(separatedBy: "|")[0] }) == parentKey!.components(separatedBy: "|")[0]
+            let fits = rectContained(hitRect, in: region, slack: CGFloat(overhang))
+            let overlap = hitRect.intersection(cell)
+            if isParent || overlap.isNull || overlap.isEmpty || (!fits && hitRect.insetBy(dx: -slack, dy: -slack).contains(cell)) {
+                // The parent, an ancestor, or an answer that misses the cell.
+                refine()
+                continue
             }
-
-            guard let hitRect = rect(of: hit) else { continue }
-
-            if !rectContained(hitRect, in: region, slack: slack) { continue }
-
-            // Phase 2 dedup: a hit inside any existing direct-child frame is
-            // already represented by a descendant of that child.
-            if childFrames.contains(where: { rectContained(hitRect, in: $0, slack: slack) }) { continue }
 
             // Nil key → zero/missing-frame hit: bypass identity dedup.
-            if let key = identityKey(for: hit) {
-                if seen.contains(key) { continue }
-                seen.insert(key)
+            let key = identityKey(for: hit)
+            // A hit inside any existing direct-child frame (phase 2's
+            // children, phase 1's adopted hits) is already represented by
+            // that child or is found by probing it.
+            let isNew = fits
+                && !childFrames.contains(where: { rectContained(hitRect, in: $0, slack: slack) })
+                && !(key.map(seen.contains) ?? false)
+            guard isNew else {
+                // A neighbour, or an element already found: the rest of the
+                // cell may still hold something new.
+                covered.append(hitRect)
+                sampleRest(besides: hitRect)
+                continue
             }
-            var marked = hit
-            marked["synthesized"] = true
-            hits.append(marked)
+            if let key { seen.insert(key) }
+            hits.append(claim(hit, seen: seen))
             covered.append(hitRect)
 
             let clipped = hitRect.intersection(region)
@@ -271,18 +336,58 @@ public enum CollapsedChildrenRecovery {
                 if coveredArea >= coverageTarget { break drain }
             }
 
-            // Opportunistic remainder subdivide: everything the hit did not
-            // occupy becomes a candidate for further sampling so thin
-            // neighbours stay reachable through the refinement chain.
-            for remainder in subtract(hitRect, from: cell)
-            where remainder.width * remainder.height > CGFloat(tuning.minRemainderArea) {
-                queue.push(remainder)
-            }
+            sampleRest(besides: hitRect)
         }
         return hits
     }
 
     // MARK: - Geometry helpers
+
+    /// The hit, marked as synthesized, with any children it came with minus
+    /// the elements already seen (whose own children take their place).
+    /// Records what it keeps in `seen`.
+    private static func claim(_ hit: [String: Any], seen: SeenIdentitySet) -> [String: Any] {
+        var node = hit
+        node["synthesized"] = true
+        var children: [[String: Any]] = []
+        for child in (hit["children"] as? [[String: Any]]) ?? [] {
+            if let key = identityKey(for: child) {
+                if seen.contains(key) {
+                    children += (claim(child, seen: seen)["children"] as? [[String: Any]]) ?? []
+                    continue
+                }
+                seen.insert(key)
+            }
+            children.append(claim(child, seen: seen))
+        }
+        node["children"] = children
+        return node
+    }
+
+    /// Groups hits found at one level by where they sit: each goes under
+    /// the smallest container hit (by `containerRoles`) that holds it to
+    /// within `overhang`. Returns the outermost hits, in their original
+    /// order, each with every hit inside it, however deep; walking the
+    /// holder nests those further.
+    private static func nest(_ hits: [[String: Any]]) -> [(node: [String: Any], inside: [[String: Any]])] {
+        guard hits.count > 1 else { return hits.map { ($0, []) } }
+        let rects = hits.map { rect(of: $0) }
+        func area(_ i: Int) -> CGFloat { rects[i].map { $0.width * $0.height } ?? 0 }
+        var holder = [Int?](repeating: nil, count: hits.count)
+        for i in hits.indices {
+            guard let r = rects[i], area(i) > 0 else { continue }
+            for j in hits.indices where j != i {
+                guard let h = rects[j], containerRoles.contains((hits[j]["role"] as? String) ?? ""),
+                      area(j) > area(i), rectContained(r, in: h, slack: CGFloat(overhang)) else { continue }
+                if holder[i].map({ area(j) < area($0) }) ?? true { holder[i] = j }
+            }
+        }
+        // Holders are strictly larger, so each chain ends.
+        func outermost(_ i: Int) -> Int { holder[i].map(outermost) ?? i }
+        var inside: [Int: [[String: Any]]] = [:]
+        for i in hits.indices where holder[i] != nil { inside[outermost(i), default: []].append(hits[i]) }
+        return hits.indices.filter { holder[$0] == nil }.map { (hits[$0], inside[$0] ?? []) }
+    }
 
     private static func rectContained(_ inner: CGRect, in outer: CGRect, slack: CGFloat) -> Bool {
         if inner.minX + slack < outer.minX { return false }
