@@ -6,10 +6,9 @@ import SimBridge
 //   sim-agentation serve [--port 38470] [--open]
 //   sim-agentation mcp
 //   sim-agentation version
+//   sim-agentation help
 
 let arguments = Array(CommandLine.arguments.dropFirst())
-// No command means serve.
-let command = arguments.first.flatMap { $0.hasPrefix("-") ? nil : $0 } ?? "serve"
 
 func option(_ name: String) -> String? {
     guard let i = arguments.firstIndex(of: name), i + 1 < arguments.count else { return nil }
@@ -21,8 +20,10 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
+let command = CLICommand.parse(arguments)
+
 switch command {
-case "serve":
+case .serve:
     var port = Config.defaultPort
     if let value = option("--port") {
         guard let parsed = UInt16(value) else { fail("sim-agentation: bad --port \(value)") }
@@ -55,18 +56,17 @@ case "serve":
     // async code keeps serviced while it sleeps here.
     while true { try await Task.sleep(for: .seconds(3600)) }
 
-case "mcp":
+case .mcp:
     await MCPServer(port: Config.defaultPort).run()
     exit(0)
 
-case "version":
+case .version:
+    // Exactly the version: app/scripts/mcp-launch.sh compares it.
     print(Config.version)
 
-default:
-    fail("""
-    Usage:
-      sim-agentation serve [--port N] [--open]   Start the browser UI on http://localhost:\(Config.defaultPort)
-      sim-agentation mcp                         Run the MCP server over stdio (for Claude Code, Codex, …)
-      sim-agentation version                     Print the version
-    """)
+case .help:
+    print(CLICommand.usage)
+
+case .unknown, .missingValue:
+    fail("sim-agentation: \(command.error ?? "bad arguments")\n\(CLICommand.usage)")
 }
