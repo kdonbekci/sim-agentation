@@ -20,7 +20,9 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-switch CLICommand.parse(arguments) {
+let command = CLICommand.parse(arguments)
+
+switch command {
 case .serve:
     var port = Config.defaultPort
     if let value = option("--port") {
@@ -65,6 +67,6 @@ case .version:
 case .help:
     print(CLICommand.usage)
 
-case .unknown(let word):
-    fail("sim-agentation: unknown command '\(word)'\n\(CLICommand.usage)")
+case .unknown, .missingValue:
+    fail("sim-agentation: \(command.error ?? "bad arguments")\n\(CLICommand.usage)")
 }

@@ -30,17 +30,34 @@ jobs:
         run: pnpm build
       - run: swift test --package-path app/host
       - name: Command line answers without starting a server
-        # perl's alarm stands in for timeout, which the runner may not have.
+        # perl's alarm stands in for timeout, which the runner may not have; a
+        # run it kills exits 142, so every check below wants an exact status.
         # A free port, so a regression that serves fails fast instead of hanging.
         env:
           SIM_AGENTATION_PORT: "38499"
         run: |
           b=app/host/.build/debug/sim-agentation
-          run() { perl -e 'alarm 5; exec @ARGV' "$b" "$@"; }
           version=$(sed -n 's/.*static let version = "\(.*\)".*/\1/p' app/host/Sources/sim-agentation/Config.swift)
-          for a in help --help -h; do run "$a" | grep -q Usage; done
-          for a in version --version -v; do test "$(run "$a")" = "$version"; done
-          ! run bogus 2>/dev/null
+          out=$(mktemp) err=$(mktemp)
+          # check STATUS STREAM ARGS...: the run exits STATUS and leaves the other stream empty.
+          check() {
+            want=$1 stream=$2; shift 2
+            rc=0; perl -e 'alarm 5; exec @ARGV' "$b" "$@" >"$out" 2>"$err" || rc=$?
+            if [ "$stream" = stdout ]; then other=$err; else other=$out; fi
+            if [ "$rc" != "$want" ] || [ -s "$other" ]; then
+              echo "::error::sim-agentation $*: exit $rc (want exit $want, with output only on $stream)"
+              cat "$out" "$err"; exit 1
+            fi
+          }
+          for a in help --help -h "serve --help" "--port 38499 -h"; do
+            check 0 stdout $a; grep -q '^Usage:' "$out" || { echo "::error::sim-agentation $a: no usage"; exit 1; }
+          done
+          for a in version --version -v "serve -v"; do
+            check 0 stdout $a; [ "$(cat "$out")" = "$version" ] || { echo "::error::sim-agentation $a: not $version"; exit 1; }
+          done
+          for a in bogus --bogus -x -help --Help "serve bogus" "mcp bogus" --port; do
+            check 1 stderr $a; grep -q '^Usage:' "$err" || { echo "::error::sim-agentation $a: no usage on stderr"; exit 1; }
+          done
       - name: Package (release build)
         run: app/scripts/package.sh
       - uses: actions/upload-artifact@v4
